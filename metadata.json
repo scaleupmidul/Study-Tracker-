@@ -1,0 +1,8 @@
+{
+  "name": "Study Tracker",
+  "description": "A minimalist study tracker designed for mastering Speaking, Reading, Writing, and Listening with focused study sessions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
