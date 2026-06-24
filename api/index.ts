@@ -9,7 +9,7 @@ import {
   getUserById,
   createToken,
   verifyToken 
-} from '../server/db';
+} from '../server/db.ts';
 
 const app = express();
 app.use(express.json());
