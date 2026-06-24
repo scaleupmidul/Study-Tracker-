@@ -118,7 +118,17 @@ export default function Dashboard() {
           password: authPassword.trim()
         })
       });
-      const data = await res.json();
+      
+      const responseText = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseErr) {
+        setAuthError(`Server Error (${res.status}): ${responseText.substring(0, 120)}...`);
+        setAuthSubmitting(false);
+        return;
+      }
+
       if (res.ok) {
         localStorage.setItem('deep_focus_token', data.token);
         setUser(data.user);
@@ -139,8 +149,8 @@ export default function Dashboard() {
       } else {
         setAuthError(data.error || 'Authentication failed');
       }
-    } catch (err) {
-      setAuthError('Failed to connect to authentication server. Please try again.');
+    } catch (err: any) {
+      setAuthError(`Connection error: ${err.message || 'Please check your connection.'}`);
     } finally {
       setAuthSubmitting(false);
     }
