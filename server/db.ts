@@ -1,51 +1,14 @@
 import { MongoClient, Db, Collection } from 'mongodb';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 import { Session } from '../src/types';
 import { INITIAL_SESSIONS } from '../src/data';
-
-interface UserRecord {
-  id: string;
-  username: string;
-  email?: string;
-  passwordHash: string;
-  salt: string;
-  createdAt: string;
-}
-
-interface LocalDbData {
-  users: UserRecord[];
-  sessions: Session[];
-}
 
 let client: MongoClient | null = null;
 let db: Db | null = null;
 let sessionsCollection: Collection<Session> | null = null;
 
-const LOCAL_DB_PATH = path.join(process.cwd(), '.local_db.json');
-
-function loadLocalDb(): LocalDbData {
-  try {
-    if (fs.existsSync(LOCAL_DB_PATH)) {
-      const raw = fs.readFileSync(LOCAL_DB_PATH, 'utf-8');
-      return JSON.parse(raw);
-    }
-  } catch (e) {
-    console.error('⚠️ Failed to load local DB file:', e);
-  }
-  return { users: [], sessions: [] };
-}
-
-function saveLocalDb(data: LocalDbData) {
-  try {
-    fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (e) {
-    console.error('⚠️ Failed to save local DB file:', e);
-  }
-}
-
-let localDb = loadLocalDb();
+// Fallback in-memory storage for when MONGODB_URI is not provided
+let inMemorySessions: Session[] = [];
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-for-deep-focus-german-app';
 
@@ -73,23 +36,24 @@ export function verifyToken(token: string): string | null {
 }
 
 export async function getDb() {
-  const uri = process.env.MONGODB_URI;
-  if (!uri || uri.includes('<username>') || uri.includes('<cluster>')) {
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  if (!uri) {
+    console.warn('⚠️ MONGODB_URI or MONGO_URI environment variable is missing! Falling back to in-memory storage.');
     return null;
   }
 
   if (!client) {
     try {
       client = new MongoClient(uri, {
-        connectTimeoutMS: 3000,
-        serverSelectionTimeoutMS: 3000
+        connectTimeoutMS: 5000,
+        serverSelectionTimeoutMS: 5000
       });
       await client.connect();
       db = client.db();
       sessionsCollection = db.collection<Session>('sessions');
       console.log('✅ Connected successfully to MongoDB');
     } catch (error) {
-      console.error('❌ Failed to connect to MongoDB, using local file persistence:', error);
+      console.error('❌ Failed to connect to MongoDB:', error);
       client = null;
       db = null;
       sessionsCollection = null;
@@ -102,47 +66,16 @@ export async function getDb() {
 
 // --- USER AUTHENTICATION LOGIC ---
 export async function registerUser(username: string, password: string) {
-  const normalizedUsername = username.trim().toLowerCase();
   const dbObj = await getDb();
-  
-  if (dbObj && dbObj.db) {
-    try {
-      const usersCollection = dbObj.db.collection('users');
-      // Safely remove legacy unique index on email if present from old database schemas
-      try {
-        await usersCollection.dropIndex('email_1');
-      } catch {}
-
-      const existing = await usersCollection.findOne({ username: normalizedUsername });
-      if (existing) {
-        throw new Error('Username already exists. Please choose another.');
-      }
-      const salt = crypto.randomBytes(16).toString('hex');
-      const passwordHash = hashPassword(password, salt);
-      const userId = `u-${Date.now()}`;
-      
-      const newUser = {
-        id: userId,
-        username: normalizedUsername,
-        email: `${normalizedUsername}_${userId}@deepfocus.local`,
-        passwordHash,
-        salt,
-        createdAt: new Date()
-      };
-      
-      await usersCollection.insertOne(newUser);
-      return { id: userId, username: normalizedUsername };
-    } catch (e: any) {
-      if (e.message?.includes('already exists') || e.code === 11000 || e.message?.includes('E11000') || e.message?.includes('duplicate key')) {
-        throw new Error('Username already exists. Please choose another.');
-      }
-      console.error('MongoDB register failed, falling back to local storage:', e);
-    }
+  if (!dbObj || !dbObj.db) {
+    throw new Error('Database connection failed. Please try again.');
   }
   
-  // Local file storage fallback
-  const existingLocal = localDb.users.find(u => u.username === normalizedUsername);
-  if (existingLocal) {
+  const usersCollection = dbObj.db.collection('users');
+  const normalizedUsername = username.trim().toLowerCase();
+  
+  const existing = await usersCollection.findOne({ username: normalizedUsername });
+  if (existing) {
     throw new Error('Username already exists. Please choose another.');
   }
   
@@ -150,78 +83,48 @@ export async function registerUser(username: string, password: string) {
   const passwordHash = hashPassword(password, salt);
   const userId = `u-${Date.now()}`;
   
-  const newUserRecord: UserRecord = {
+  const newUser = {
     id: userId,
     username: normalizedUsername,
     passwordHash,
     salt,
-    createdAt: new Date().toISOString()
+    createdAt: new Date()
   };
   
-  localDb.users.push(newUserRecord);
-  
-  // Seed initial study sessions for new user
-  const userInitial = INITIAL_SESSIONS.map((s, index) => ({
-    ...s,
-    id: `s-${Date.now()}-${index}`,
-    userId
-  }));
-  localDb.sessions.push(...userInitial);
-  
-  saveLocalDb(localDb);
+  await usersCollection.insertOne(newUser);
   return { id: userId, username: normalizedUsername };
 }
 
 export async function loginUser(username: string, password: string) {
-  const normalizedUsername = username.trim().toLowerCase();
   const dbObj = await getDb();
-  
-  if (dbObj && dbObj.db) {
-    try {
-      const usersCollection = dbObj.db.collection('users');
-      const user = await usersCollection.findOne({ username: normalizedUsername });
-      if (user) {
-        const passwordHash = hashPassword(password, user.salt);
-        if (passwordHash !== user.passwordHash) {
-          throw new Error('Invalid username or password.');
-        }
-        return { id: user.id, username: user.username };
-      }
-    } catch (e: any) {
-      if (e.message?.includes('Invalid username')) throw e;
-      console.error('MongoDB login failed, checking local storage:', e);
-    }
+  if (!dbObj || !dbObj.db) {
+    throw new Error('Database connection failed. Please try again.');
   }
   
-  // Local file storage fallback
-  const userLocal = localDb.users.find(u => u.username === normalizedUsername);
-  if (!userLocal) {
+  const usersCollection = dbObj.db.collection('users');
+  const normalizedUsername = username.trim().toLowerCase();
+  
+  const user = await usersCollection.findOne({ username: normalizedUsername });
+  if (!user) {
     throw new Error('Invalid username or password.');
   }
   
-  const passwordHash = hashPassword(password, userLocal.salt);
-  if (passwordHash !== userLocal.passwordHash) {
+  const passwordHash = hashPassword(password, user.salt);
+  if (passwordHash !== user.passwordHash) {
     throw new Error('Invalid username or password.');
   }
   
-  return { id: userLocal.id, username: userLocal.username };
+  return { id: user.id, username: user.username };
 }
 
 export async function getUserById(userId: string) {
   const dbObj = await getDb();
-  if (dbObj && dbObj.db) {
-    try {
-      const usersCollection = dbObj.db.collection('users');
-      const user = await usersCollection.findOne({ id: userId });
-      if (user) return { id: user.id, username: user.username };
-    } catch (e) {
-      console.error('MongoDB getUserById error:', e);
-    }
-  }
+  if (!dbObj || !dbObj.db) return null;
   
-  const userLocal = localDb.users.find(u => u.id === userId);
-  if (!userLocal) return null;
-  return { id: userLocal.id, username: userLocal.username };
+  const usersCollection = dbObj.db.collection('users');
+  const user = await usersCollection.findOne({ id: userId });
+  if (!user) return null;
+  return { id: user.id, username: user.username };
 }
 
 // --- SESSIONS LOGIC PER USER ---
@@ -230,6 +133,7 @@ export async function fetchSessions(userId: string): Promise<Session[]> {
   if (dbObj && dbObj.sessionsCollection) {
     try {
       const docs = await dbObj.sessionsCollection.find({ userId }).toArray();
+      // Seed initial sessions for this user if they don't have any sessions yet
       if (docs.length === 0) {
         console.log(`🌱 Seeding initial sessions for user ${userId} in MongoDB...`);
         const userInitial = INITIAL_SESSIONS.map((s, index) => ({
@@ -245,39 +149,36 @@ export async function fetchSessions(userId: string): Promise<Session[]> {
         return sessionData as Session;
       });
     } catch (e) {
-      console.error('Failed to fetch from MongoDB, falling back to local file:', e);
+      console.error('Failed to fetch from MongoDB, falling back to in-memory:', e);
     }
   }
   
-  // Local file fallback
-  const userSessions = localDb.sessions.filter(s => s.userId === userId);
+  // In-memory fallback
+  const userSessions = inMemorySessions.filter(s => s.userId === userId);
   if (userSessions.length === 0) {
     const userInitial = INITIAL_SESSIONS.map((s, index) => ({
       ...s,
       id: `s-${Date.now()}-${index}`,
       userId
     }));
-    localDb.sessions.push(...userInitial);
-    saveLocalDb(localDb);
+    inMemorySessions.push(...userInitial);
     return userInitial;
   }
   return userSessions;
 }
 
 export async function addSession(session: Session, userId: string): Promise<Session> {
-  const sessionWithUser = { ...session, userId };
   const dbObj = await getDb();
+  const sessionWithUser = { ...session, userId };
   if (dbObj && dbObj.sessionsCollection) {
     try {
-      const { _id, ...cleanSession } = sessionWithUser as any;
-      await dbObj.sessionsCollection.insertOne(cleanSession as any);
-      return cleanSession;
+      await dbObj.sessionsCollection.insertOne({ ...sessionWithUser } as any);
+      return sessionWithUser;
     } catch (e) {
-      console.error('Failed to insert to MongoDB, using local file:', e);
+      console.error('Failed to insert to MongoDB, using in-memory:', e);
     }
   }
-  localDb.sessions.push(sessionWithUser);
-  saveLocalDb(localDb);
+  inMemorySessions.push(sessionWithUser);
   return sessionWithUser;
 }
 
@@ -288,13 +189,12 @@ export async function deleteSession(id: string, userId: string): Promise<boolean
       const result = await dbObj.sessionsCollection.deleteOne({ id, userId });
       return result.deletedCount > 0;
     } catch (e) {
-      console.error('Failed to delete from MongoDB, using local file:', e);
+      console.error('Failed to delete from MongoDB, using in-memory:', e);
     }
   }
-  const index = localDb.sessions.findIndex(s => s.id === id && s.userId === userId);
+  const index = inMemorySessions.findIndex(s => s.id === id && s.userId === userId);
   if (index !== -1) {
-    localDb.sessions.splice(index, 1);
-    saveLocalDb(localDb);
+    inMemorySessions.splice(index, 1);
     return true;
   }
   return false;
@@ -313,16 +213,15 @@ export async function resetSessions(userId: string): Promise<boolean> {
       await dbObj.sessionsCollection.insertMany(userInitial);
       return true;
     } catch (e) {
-      console.error('Failed to reset MongoDB, resetting local file:', e);
+      console.error('Failed to reset MongoDB, resetting in-memory:', e);
     }
   }
-  localDb.sessions = localDb.sessions.filter(s => s.userId !== userId);
+  inMemorySessions = inMemorySessions.filter(s => s.userId !== userId);
   const userInitial = INITIAL_SESSIONS.map((s, index) => ({
     ...s,
     id: `s-${Date.now()}-${index}`,
     userId
   }));
-  localDb.sessions.push(...userInitial);
-  saveLocalDb(localDb);
+  inMemorySessions.push(...userInitial);
   return true;
 }
