@@ -45,19 +45,27 @@ export function verifyToken(token: string): string | null {
 }
 
 export async function getDb() {
-  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+  let uri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!uri) {
     console.warn('⚠️ MONGODB_URI or MONGO_URI environment variable is missing! Falling back to in-memory storage.');
     return null;
+  }
+
+  // Sanitizing potential quotes around URI (extremely common copy-paste issue on Vercel)
+  uri = uri.trim();
+  if ((uri.startsWith('"') && uri.endsWith('"')) || (uri.startsWith("'") && uri.endsWith("'"))) {
+    uri = uri.slice(1, -1).trim();
   }
 
   if (!client) {
     try {
       console.log('Connecting to MongoDB...');
       client = new MongoClient(uri, {
-        connectTimeoutMS: 5000,
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS: 5000
+        connectTimeoutMS: 3000,
+        serverSelectionTimeoutMS: 3000,
+        socketTimeoutMS: 3000,
+        maxPoolSize: 10,
+        minPoolSize: 0
       });
       
       await client.connect();
@@ -76,19 +84,40 @@ export async function getDb() {
   return { client, db, sessionsCollection };
 }
 
-// Generic runner with fallback
+// Generic runner with fallback and a strict 4-second timeout to prevent serverless function hanging
 async function runWithFallback<T>(
   mongoOp: (dbObj: { client: MongoClient; db: Db; sessionsCollection: Collection<Session> }) => Promise<T>,
   fallbackOp: () => Promise<T>
 ): Promise<T> {
-  try {
+  const timeoutMs = 4000; // Strict 4 seconds timeout for connection + operation
+  let timeoutId: NodeJS.Timeout | null = null;
+
+  const runMongoProcess = async (): Promise<T> => {
     const dbObj = await getDb();
     if (dbObj && dbObj.db && dbObj.sessionsCollection) {
       return await mongoOp(dbObj as any);
     }
+    throw new Error('MongoDB database not available');
+  };
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error('MongoDB operation or connection timed out'));
+    }, timeoutMs);
+  });
+
+  try {
+    const result = await Promise.race([
+      runMongoProcess(),
+      timeoutPromise
+    ]);
+    if (timeoutId) clearTimeout(timeoutId);
+    return result;
   } catch (error) {
-    console.error('⚠️ MongoDB operation failed, falling back to in-memory:', error);
+    if (timeoutId) clearTimeout(timeoutId);
+    console.error('⚠️ MongoDB operation failed or timed out, falling back to in-memory:', error);
   }
+  
   return await fallbackOp();
 }
 
