@@ -8,6 +8,7 @@ import { INITIAL_SESSIONS } from '../src/data';
 interface UserRecord {
   id: string;
   username: string;
+  email?: string;
   passwordHash: string;
   salt: string;
   createdAt: string;
@@ -107,6 +108,11 @@ export async function registerUser(username: string, password: string) {
   if (dbObj && dbObj.db) {
     try {
       const usersCollection = dbObj.db.collection('users');
+      // Safely remove legacy unique index on email if present from old database schemas
+      try {
+        await usersCollection.dropIndex('email_1');
+      } catch {}
+
       const existing = await usersCollection.findOne({ username: normalizedUsername });
       if (existing) {
         throw new Error('Username already exists. Please choose another.');
@@ -118,6 +124,7 @@ export async function registerUser(username: string, password: string) {
       const newUser = {
         id: userId,
         username: normalizedUsername,
+        email: `${normalizedUsername}_${userId}@deepfocus.local`,
         passwordHash,
         salt,
         createdAt: new Date()
@@ -126,7 +133,9 @@ export async function registerUser(username: string, password: string) {
       await usersCollection.insertOne(newUser);
       return { id: userId, username: normalizedUsername };
     } catch (e: any) {
-      if (e.message?.includes('already exists')) throw e;
+      if (e.message?.includes('already exists') || e.code === 11000 || e.message?.includes('E11000') || e.message?.includes('duplicate key')) {
+        throw new Error('Username already exists. Please choose another.');
+      }
       console.error('MongoDB register failed, falling back to local storage:', e);
     }
   }
@@ -260,8 +269,9 @@ export async function addSession(session: Session, userId: string): Promise<Sess
   const dbObj = await getDb();
   if (dbObj && dbObj.sessionsCollection) {
     try {
-      await dbObj.sessionsCollection.insertOne({ ...sessionWithUser } as any);
-      return sessionWithUser;
+      const { _id, ...cleanSession } = sessionWithUser as any;
+      await dbObj.sessionsCollection.insertOne(cleanSession as any);
+      return cleanSession;
     } catch (e) {
       console.error('Failed to insert to MongoDB, using local file:', e);
     }
