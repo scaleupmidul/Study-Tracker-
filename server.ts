@@ -11,7 +11,7 @@ import {
   getUserById,
   createToken,
   verifyToken 
-} from './server/db';
+} from './server/db.ts';
 
 async function startServer() {
   const app = express();
